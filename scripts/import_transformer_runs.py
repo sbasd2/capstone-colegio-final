@@ -19,6 +19,7 @@ RUNS = (
         "run_dir": ROOT / "runs_timesformer_cctv_clean",
         "checkpoint_dir": ROOT / "runs_timesformer_cctv_clean" / "best_timesformer_cctv",
         "model_path": ROOT / "runs_timesformer_cctv_clean" / "best_timesformer_cctv.pt",
+        "repo_id": "inicial-tope/capstone-timesformer-cctv",
     },
     {
         "id": "videomae",
@@ -28,6 +29,7 @@ RUNS = (
         "run_dir": ROOT / "runs_videomae_cctv_clean",
         "checkpoint_dir": ROOT / "runs_videomae_cctv_clean" / "best_videomae_cctv",
         "model_path": ROOT / "runs_videomae_cctv_clean" / "best_videomae_cctv.pt",
+        "repo_id": "inicial-tope/capstone-videomae-cctv",
     },
 )
 
@@ -103,8 +105,9 @@ def build_model_entry(run: dict[str, Any]) -> dict[str, Any]:
         "type": run["type"],
         "status": run["status"],
         "framework": "PyTorch + Hugging Face Transformers",
-        "model_path": str(run["model_path"]),
-        "checkpoint_dir": str(checkpoint_dir),
+        "model_path": "",
+        "checkpoint_dir": "",
+        "repo_id": run["repo_id"],
         "summary": {
             "accuracy": accuracy_from_confusion(matrix),
             "precision": final_metrics["test_precision_at_valid_threshold"],
@@ -156,8 +159,10 @@ def build_movinet_entry() -> dict[str, Any] | None:
         "type": "Video",
         "status": "Entrenado",
         "framework": "Keras 3 + TensorFlow Hub",
-        "model_path": str(model_path),
-        "checkpoint_dir": str(MOVINET_DIR),
+        "model_path": "",
+        "checkpoint_dir": "",
+        "repo_id": "inicial-tope/capstone-movinet-a2-cctv",
+        "hf_filename": "best_movinet_a2_cctv_direct.keras",
         "summary": {
             "accuracy": accuracy_from_confusion(matrix),
             "precision": precision,

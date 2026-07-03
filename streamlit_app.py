@@ -45,6 +45,8 @@ class ModelMetric:
     pr_curve: tuple[dict[str, object], ...] = ()
     framework: str = ""
     checkpoint_dir: str = ""
+    repo_id: str = ""
+    hf_filename: str = ""
     threshold: float | None = None
     num_frames: int | None = None
     image_size: int | None = None
@@ -112,6 +114,8 @@ def load_model_metrics() -> tuple[ModelMetric, ...]:
                 pr_curve=tuple(raw_model.get("pr_curve") or ()),
                 framework=str(raw_model.get("framework") or ""),
                 checkpoint_dir=str(raw_model.get("checkpoint_dir") or ""),
+                repo_id=str(raw_model.get("repo_id") or ""),
+                hf_filename=str(raw_model.get("hf_filename") or ""),
                 threshold=safe_float(decision.get("threshold"), 0.0) if "threshold" in decision else None,
                 num_frames=int(preprocessing["num_frames"]) if "num_frames" in preprocessing else None,
                 image_size=int(input_size[0]) if input_size else None,
@@ -578,6 +582,61 @@ def file_size_mb(uploaded_file: BinaryIO) -> float:
     return size
 
 
+def get_hf_token() -> str | None:
+    try:
+        token = st.secrets.get("HF_TOKEN", "")
+    except Exception:
+        token = ""
+
+    return str(token).strip() or None
+
+
+@st.cache_resource(show_spinner=False)
+def download_hf_snapshot(repo_id: str) -> str:
+    from huggingface_hub import snapshot_download
+
+    return snapshot_download(
+        repo_id=repo_id,
+        repo_type="model",
+        token=get_hf_token(),
+    )
+
+
+@st.cache_resource(show_spinner=False)
+def download_hf_file(repo_id: str, filename: str) -> str:
+    from huggingface_hub import hf_hub_download
+
+    return hf_hub_download(
+        repo_id=repo_id,
+        filename=filename,
+        repo_type="model",
+        token=get_hf_token(),
+    )
+
+
+def resolve_transformer_checkpoint(metric: ModelMetric) -> Path:
+    checkpoint_dir = Path(metric.checkpoint_dir)
+    if metric.checkpoint_dir and checkpoint_dir.exists():
+        return checkpoint_dir
+
+    if metric.repo_id:
+        return Path(download_hf_snapshot(metric.repo_id))
+
+    raise FileNotFoundError(f"No se encontro checkpoint local ni repo_id para {metric.name}.")
+
+
+def resolve_movinet_model_path(metric: ModelMetric) -> Path:
+    model_path = Path(metric.model_path)
+    if metric.model_path and model_path.exists():
+        return model_path
+
+    if metric.repo_id:
+        filename = metric.hf_filename or "best_movinet_a2_cctv_direct.keras"
+        return Path(download_hf_file(metric.repo_id, filename))
+
+    raise FileNotFoundError(f"No se encontro modelo local ni repo_id para {metric.name}.")
+
+
 @st.cache_resource(show_spinner=False)
 def load_video_model(checkpoint_dir: str):
     from transformers import AutoModelForVideoClassification
@@ -699,10 +758,7 @@ def preprocess_video_for_keras(video_bytes: bytes, metric: ModelMetric) -> np.nd
 def score_with_transformers(video_bytes: bytes, metric: ModelMetric) -> float:
     import torch
 
-    checkpoint_dir = Path(metric.checkpoint_dir)
-    if not checkpoint_dir.exists():
-        raise FileNotFoundError(f"No se encontro el checkpoint: {checkpoint_dir}")
-
+    checkpoint_dir = resolve_transformer_checkpoint(metric)
     pixel_values = preprocess_video_for_model(video_bytes, metric)
     model = load_video_model(str(checkpoint_dir))
 
@@ -716,10 +772,7 @@ def score_with_transformers(video_bytes: bytes, metric: ModelMetric) -> float:
 def score_with_movinet(video_bytes: bytes, metric: ModelMetric) -> float:
     import tensorflow as tf
 
-    model_path = Path(metric.model_path)
-    if not model_path.exists():
-        raise FileNotFoundError(f"No se encontro el modelo Keras: {model_path}")
-
+    model_path = resolve_movinet_model_path(metric)
     video_batch = preprocess_video_for_keras(video_bytes, metric)
     model = load_movinet_model(str(model_path))
     output = model(tf.convert_to_tensor(video_batch, dtype=tf.float32), training=False)
@@ -823,7 +876,7 @@ def render_uploaded_file_details(name: str, size_mb: float, mime_type: str) -> N
 
 def render_registered_model_details(metric: ModelMetric) -> None:
     model_exists = Path(metric.model_path).exists() if metric.model_path else False
-    checkpoint_state = "Encontrado" if model_exists else "No encontrado"
+    checkpoint_state = "Local" if model_exists else ("Hugging Face" if metric.repo_id else "No encontrado")
     inference_state = "Disponible" if has_video_inference(metric) else "Pendiente"
     threshold = f"{metric.threshold:.4f}" if metric.threshold is not None else "-"
     frames = str(metric.num_frames) if metric.num_frames is not None else "-"
@@ -851,10 +904,10 @@ def render_registered_model_details(metric: ModelMetric) -> None:
 
 def has_video_inference(metric: ModelMetric) -> bool:
     if "Hugging Face Transformers" in metric.framework:
-        return bool(metric.checkpoint_dir) and Path(metric.checkpoint_dir).exists()
+        return bool(metric.repo_id) or (bool(metric.checkpoint_dir) and Path(metric.checkpoint_dir).exists())
 
     if "Keras" in metric.framework or "TensorFlow Hub" in metric.framework:
-        return bool(metric.model_path) and Path(metric.model_path).exists()
+        return bool(metric.repo_id) or (bool(metric.model_path) and Path(metric.model_path).exists())
 
     return False
 
