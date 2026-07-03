@@ -126,6 +126,7 @@ def load_model_metrics() -> tuple[ModelMetric, ...]:
 
 
 MODEL_METRICS = load_model_metrics()
+COMPARISON_METRIC_LABELS = ("Accuracy", "Precision", "Recall", "F1-score", "ROC-AUC", "PR-AUC")
 
 
 def set_page_style() -> None:
@@ -1105,18 +1106,33 @@ def build_pr_curve(metric: ModelMetric) -> pd.DataFrame:
     return pd.DataFrame(rows)
 
 
-def build_comparison_metrics() -> pd.DataFrame:
-    rows = []
-    for metric in MODEL_METRICS:
-        rows.extend(
-            (
-                {"Modelo": metric.name, "Metrica": "Accuracy", "Valor": metric.accuracy},
-                {"Modelo": metric.name, "Metrica": "F1-score", "Valor": metric.f1_score},
-                {"Modelo": metric.name, "Metrica": "ROC-AUC", "Valor": metric.roc_auc},
-                {"Modelo": metric.name, "Metrica": "PR-AUC", "Valor": metric.pr_auc},
-            )
-        )
-    return pd.DataFrame(rows)
+def build_comparison_table() -> pd.DataFrame:
+    return pd.DataFrame(
+        [
+            {
+                "Modelo": metric.name,
+                "Accuracy": round(metric.accuracy, 4),
+                "Precision": round(metric.precision, 4),
+                "Recall": round(metric.recall, 4),
+                "F1-score": round(metric.f1_score, 4),
+                "ROC-AUC": round(metric.roc_auc, 4),
+                "PR-AUC": round(metric.pr_auc, 4),
+            }
+            for metric in MODEL_METRICS
+        ]
+    )
+
+
+def render_comparison_table(comparison_df: pd.DataFrame) -> None:
+    st.dataframe(
+        comparison_df,
+        hide_index=True,
+        width="stretch",
+        column_config={
+            label: st.column_config.NumberColumn(label, format="%.4f")
+            for label in COMPARISON_METRIC_LABELS
+        },
+    )
 
 
 def render_kpis(metric: ModelMetric) -> None:
@@ -1129,25 +1145,39 @@ def render_kpis(metric: ModelMetric) -> None:
     columns[5].metric("PR-AUC", f"{metric.pr_auc:.3f}")
 
 
-def render_comparison_chart() -> None:
-    comparison_df = build_comparison_metrics()
+def render_comparison_chart(comparison_df: pd.DataFrame) -> None:
+    chart_df = comparison_df.melt(
+        id_vars=["Modelo"],
+        value_vars=list(COMPARISON_METRIC_LABELS),
+        var_name="Metrica",
+        value_name="Valor",
+    )
     chart = (
-        alt.Chart(comparison_df)
+        alt.Chart(chart_df)
         .mark_bar(cornerRadiusTopLeft=3, cornerRadiusTopRight=3)
         .encode(
-            x=alt.X("Modelo:N", title=None, sort=[metric.name for metric in MODEL_METRICS]),
+            x=alt.X(
+                "Modelo:N",
+                title="Modelo",
+                sort=[metric.name for metric in MODEL_METRICS],
+                axis=alt.Axis(labelAngle=0),
+            ),
+            xOffset=alt.XOffset("Metrica:N", sort=list(COMPARISON_METRIC_LABELS)),
             y=alt.Y("Valor:Q", title="Valor", scale=alt.Scale(domain=[0, 1])),
-            color=alt.Color("Metrica:N", title="Metrica"),
-            column=alt.Column("Metrica:N", title=None),
+            color=alt.Color(
+                "Metrica:N",
+                title="Metrica",
+                sort=list(COMPARISON_METRIC_LABELS),
+            ),
             tooltip=[
                 alt.Tooltip("Modelo:N"),
                 alt.Tooltip("Metrica:N"),
-                alt.Tooltip("Valor:Q", format=".3f"),
+                alt.Tooltip("Valor:Q", format=".4f"),
             ],
         )
-        .properties(height=260)
+        .properties(height=360)
     )
-    st.altair_chart(chart, use_container_width=True)
+    st.altair_chart(chart, width="stretch")
 
 
 def render_training_charts(metric: ModelMetric) -> None:
@@ -1190,10 +1220,10 @@ def render_training_charts(metric: ModelMetric) -> None:
     left_column, right_column = st.columns(2, gap="large")
     with left_column:
         st.subheader("Train loss vs Val loss")
-        st.altair_chart(loss_chart, use_container_width=True)
+        st.altair_chart(loss_chart, width="stretch")
     with right_column:
         st.subheader("Train accuracy vs Val accuracy")
-        st.altair_chart(accuracy_chart, use_container_width=True)
+        st.altair_chart(accuracy_chart, width="stretch")
 
 
 def render_confusion_matrix(metric: ModelMetric) -> None:
@@ -1215,7 +1245,7 @@ def render_confusion_matrix(metric: ModelMetric) -> None:
         text=alt.Text("Cantidad:Q"),
         color=alt.condition(alt.datum.Cantidad > threshold, alt.value("white"), alt.value("#111827")),
     )
-    st.altair_chart((heatmap + labels).properties(height=330), use_container_width=True)
+    st.altair_chart((heatmap + labels).properties(height=330), width="stretch")
 
 
 def render_auc_curves(metric: ModelMetric) -> None:
@@ -1264,10 +1294,10 @@ def render_auc_curves(metric: ModelMetric) -> None:
     left_column, right_column = st.columns(2, gap="large")
     with left_column:
         st.subheader(f"ROC-AUC: {metric.roc_auc:.3f}")
-        st.altair_chart((roc_chart + diagonal).properties(height=330), use_container_width=True)
+        st.altair_chart((roc_chart + diagonal).properties(height=330), width="stretch")
     with right_column:
         st.subheader(f"PR-AUC: {metric.pr_auc:.3f}")
-        st.altair_chart(pr_chart, use_container_width=True)
+        st.altair_chart(pr_chart, width="stretch")
 
 
 def render_metrics_module() -> None:
@@ -1288,7 +1318,9 @@ def render_metrics_module() -> None:
     st.divider()
 
     st.subheader("Comparacion general")
-    render_comparison_chart()
+    comparison_df = build_comparison_table()
+    render_comparison_table(comparison_df)
+    render_comparison_chart(comparison_df)
     st.divider()
 
     render_training_charts(metric)
