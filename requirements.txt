@@ -1,0 +1,9 @@
+streamlit>=1.58
+pandas>=2
+altair>=5
+torch>=2.4
+transformers>=4.46
+safetensors>=0.4
+opencv-python-headless>=4.9
+tensorflow>=2.16
+tensorflow-hub>=0.16
