@@ -47,6 +47,7 @@ class ModelMetric:
     checkpoint_dir: str = ""
     repo_id: str = ""
     hf_filename: str = ""
+    input_range: str = "[0,1]"
     threshold: float | None = None
     num_frames: int | None = None
     image_size: int | None = None
@@ -116,6 +117,7 @@ def load_model_metrics() -> tuple[ModelMetric, ...]:
                 checkpoint_dir=str(raw_model.get("checkpoint_dir") or ""),
                 repo_id=str(raw_model.get("repo_id") or ""),
                 hf_filename=str(raw_model.get("hf_filename") or ""),
+                input_range=str(preprocessing.get("input_range") or "[0,1]"),
                 threshold=safe_float(decision.get("threshold"), 0.0) if "threshold" in decision else None,
                 num_frames=int(preprocessing["num_frames"]) if "num_frames" in preprocessing else None,
                 image_size=int(input_size[0]) if input_size else None,
@@ -668,6 +670,13 @@ def load_movinet_model(model_path: str):
     )
 
 
+@st.cache_resource(show_spinner=False)
+def load_keras_model(model_path: str):
+    import keras
+
+    return keras.models.load_model(model_path, compile=False)
+
+
 def write_uploaded_video(video_bytes: bytes) -> Path:
     with tempfile.NamedTemporaryFile(delete=False, suffix=".mp4") as temp_file:
         temp_file.write(video_bytes)
@@ -753,6 +762,9 @@ def preprocess_video_for_keras(video_bytes: bytes, metric: ModelMetric) -> np.nd
         except OSError:
             pass
 
+    if metric.input_range == "[-1,1]":
+        frames = (frames * 2.0) - 1.0
+
     return np.expand_dims(frames.astype(np.float32), axis=0)
 
 
@@ -775,7 +787,7 @@ def score_with_movinet(video_bytes: bytes, metric: ModelMetric) -> float:
 
     model_path = resolve_movinet_model_path(metric)
     video_batch = preprocess_video_for_keras(video_bytes, metric)
-    model = load_movinet_model(str(model_path))
+    model = load_movinet_model(str(model_path)) if metric.id == "movinet_a2" else load_keras_model(str(model_path))
     output = model(tf.convert_to_tensor(video_batch, dtype=tf.float32), training=False)
     scores = np.asarray(output).reshape(-1)
 
