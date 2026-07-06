@@ -16,7 +16,7 @@ SUPPORTED_VIDEO_TYPES = ("mp4", "mov", "avi", "mkv", "webm")
 BASE_DIR = Path(__file__).resolve().parent
 METRICS_FILE = BASE_DIR / "metrics" / "model_metrics.json"
 MOVINET_A2_TFHUB_URL = "https://tfhub.dev/tensorflow/movinet/a2/base/kinetics-600/classification/3"
-MODEL_CACHE_VERSION = "2026-07-06-finite-video-models"
+MODEL_CACHE_VERSION = "2026-07-06-forward-output-validation"
 SHOW_CACHE_CLEAR_BUTTON = False
 
 
@@ -652,7 +652,6 @@ def resolve_movinet_model_path(metric: ModelMetric) -> Path:
 
 @st.cache_resource(show_spinner=False)
 def load_video_model(checkpoint_dir: str, cache_version: str = MODEL_CACHE_VERSION):
-    import torch
     from transformers import AutoModelForVideoClassification
 
     model = AutoModelForVideoClassification.from_pretrained(
@@ -660,14 +659,6 @@ def load_video_model(checkpoint_dir: str, cache_version: str = MODEL_CACHE_VERSI
         local_files_only=True,
     )
     model.eval()
-
-    with torch.no_grad():
-        for parameter_name, parameter in model.named_parameters():
-            if not torch.isfinite(parameter).all():
-                raise ValueError(
-                    f"El checkpoint tiene pesos invalidos (NaN o Inf) en {parameter_name}."
-                )
-
     return model
 
 
