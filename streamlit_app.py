@@ -16,8 +16,6 @@ SUPPORTED_VIDEO_TYPES = ("mp4", "mov", "avi", "mkv", "webm")
 BASE_DIR = Path(__file__).resolve().parent
 METRICS_FILE = BASE_DIR / "metrics" / "model_metrics.json"
 MOVINET_A2_TFHUB_URL = "https://tfhub.dev/tensorflow/movinet/a2/base/kinetics-600/classification/3"
-MODEL_CACHE_VERSION = "2026-07-06-forward-output-validation"
-SHOW_CACHE_CLEAR_BUTTON = False
 
 
 @dataclass(frozen=True)
@@ -26,8 +24,6 @@ class Verdict:
     confidence: float
     risk_level: str
     accent: str
-    aggression_score: float
-    threshold: float
 
 
 @dataclass(frozen=True)
@@ -574,17 +570,11 @@ def render_sidebar() -> str:
         unsafe_allow_html=True,
     )
 
-    selected_module = st.sidebar.radio(
+    return st.sidebar.radio(
         "Modulo",
         ("Seleccionar video", "Metricas"),
         label_visibility="collapsed",
     )
-
-    if SHOW_CACHE_CLEAR_BUTTON and st.sidebar.button("Limpiar cache de modelos"):
-        release_model_memory()
-        st.rerun()
-
-    return selected_module
 
 
 def file_size_mb(uploaded_file: BinaryIO) -> float:
@@ -602,34 +592,6 @@ def get_hf_token() -> str | None:
         token = ""
 
     return str(token).strip() or None
-
-
-def release_model_memory() -> None:
-    import sys
-
-    st.cache_resource.clear()
-
-    try:
-        import gc
-
-        gc.collect()
-    except Exception:
-        pass
-
-    torch = sys.modules.get("torch")
-    if torch is not None:
-        try:
-            if torch.cuda.is_available():
-                torch.cuda.empty_cache()
-        except Exception:
-            pass
-
-    tf = sys.modules.get("tensorflow")
-    if tf is not None:
-        try:
-            tf.keras.backend.clear_session()
-        except Exception:
-            pass
 
 
 @st.cache_resource(show_spinner=False)
@@ -678,23 +640,19 @@ def resolve_movinet_model_path(metric: ModelMetric) -> Path:
     raise FileNotFoundError(f"No se encontro modelo local ni repo_id para {metric.name}.")
 
 
-@st.cache_resource(show_spinner=False, max_entries=1)
-def load_video_model(checkpoint_dir: str, cache_version: str = MODEL_CACHE_VERSION):
-    import torch
+@st.cache_resource(show_spinner=False)
+def load_video_model(checkpoint_dir: str):
     from transformers import AutoModelForVideoClassification
 
-    torch.set_num_threads(min(2, max(1, torch.get_num_threads())))
     model = AutoModelForVideoClassification.from_pretrained(
         checkpoint_dir,
         local_files_only=True,
-        attn_implementation="eager",
     )
-    model.float()
     model.eval()
     return model
 
 
-@st.cache_resource(show_spinner=False, max_entries=1)
+@st.cache_resource(show_spinner=False)
 def load_movinet_model(model_path: str):
     import keras
     import tensorflow_hub as hub
@@ -712,7 +670,7 @@ def load_movinet_model(model_path: str):
     )
 
 
-@st.cache_resource(show_spinner=False, max_entries=1)
+@st.cache_resource(show_spinner=False)
 def load_keras_model(model_path: str):
     import keras
 
@@ -815,20 +773,11 @@ def score_with_transformers(video_bytes: bytes, metric: ModelMetric) -> float:
 
     checkpoint_dir = resolve_transformer_checkpoint(metric)
     pixel_values = preprocess_video_for_model(video_bytes, metric)
-    model = load_video_model(str(checkpoint_dir), MODEL_CACHE_VERSION)
+    model = load_video_model(str(checkpoint_dir))
 
     with torch.inference_mode():
         outputs = model(pixel_values=pixel_values)
-        logits = outputs.logits
-        if not torch.isfinite(logits).all():
-            raise ValueError(
-                "El modelo devolvio logits invalidos (NaN o Inf). "
-                "Revisa el checkpoint descargado y la compatibilidad de los pesos."
-            )
-        probabilities = torch.softmax(logits, dim=-1)[0].detach().cpu().numpy()
-
-    if not np.isfinite(probabilities).all():
-        raise ValueError("El modelo devolvio probabilidades invalidas (NaN o Inf).")
+        probabilities = torch.softmax(outputs.logits, dim=-1)[0].detach().cpu().numpy()
 
     return float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
 
@@ -841,17 +790,12 @@ def score_with_movinet(video_bytes: bytes, metric: ModelMetric) -> float:
     model = load_movinet_model(str(model_path)) if metric.id == "movinet_a2" else load_keras_model(str(model_path))
     output = model(tf.convert_to_tensor(video_batch, dtype=tf.float32), training=False)
     scores = np.asarray(output).reshape(-1)
-    if not np.isfinite(scores).all():
-        raise ValueError("El modelo devolvio scores invalidos (NaN o Inf).")
 
     if scores.size == 1:
         return float(np.clip(scores[0], 0.0, 1.0))
 
     shifted_scores = scores - np.max(scores)
     probabilities = np.exp(shifted_scores) / np.exp(shifted_scores).sum()
-    if not np.isfinite(probabilities).all():
-        raise ValueError("El modelo devolvio probabilidades invalidas (NaN o Inf).")
-
     return float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
 
 
@@ -863,9 +807,6 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
     else:
         raise NotImplementedError(f"No hay inferencia configurada para {metric.name}.")
 
-    if not np.isfinite(aggression_score):
-        raise ValueError("El score de agresion no es valido (NaN o Inf).")
-
     threshold = metric.threshold if metric.threshold is not None else 0.5
     predicted_aggression = aggression_score >= threshold
 
@@ -875,8 +816,6 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
             confidence=round(aggression_score * 100, 1),
             risk_level="Alto",
             accent="danger",
-            aggression_score=aggression_score,
-            threshold=threshold,
         )
 
     return Verdict(
@@ -884,8 +823,6 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
         confidence=round((1 - aggression_score) * 100, 1),
         risk_level="Bajo",
         accent="safe",
-        aggression_score=aggression_score,
-        threshold=threshold,
     )
 
 
@@ -931,8 +868,6 @@ def render_verdict(verdict: Verdict | None) -> None:
             <div class="metric-row">
                 <div class="metric-box"><span>Confianza</span><strong>{verdict.confidence:.1f}%</strong></div>
                 <div class="metric-box"><span>Nivel</span><strong>{verdict.risk_level}</strong></div>
-                <div class="metric-box"><span>Score agresion</span><strong>{verdict.aggression_score:.4f}</strong></div>
-                <div class="metric-box"><span>Umbral</span><strong>{verdict.threshold:.4f}</strong></div>
             </div>
         </div>
         """,
@@ -1009,10 +944,6 @@ def render_video_module() -> None:
         [metric.name for metric in inference_models],
     )
     registered_model = next(metric for metric in inference_models if metric.name == selected_model)
-    previous_model_id = st.session_state.get("active_inference_model_id")
-    if previous_model_id and previous_model_id != registered_model.id:
-        release_model_memory()
-    st.session_state["active_inference_model_id"] = registered_model.id
 
     if metrics_only_models:
         st.info(
@@ -1081,7 +1012,7 @@ def build_training_history(metric: ModelMetric, epochs: int = 20) -> pd.DataFram
 
         value_columns = [
             column
-            for column in ("train_loss", "val_loss", "train_accuracy", "val_accuracy", "train_recall", "val_recall")
+            for column in ("train_loss", "val_loss", "train_accuracy", "val_accuracy")
             if column in history_df.columns
         ]
         if "epoch" in history_df.columns and value_columns:
@@ -1098,7 +1029,6 @@ def build_training_history(metric: ModelMetric, epochs: int = 20) -> pd.DataFram
     start_train_loss = 1.28
     start_val_loss = 1.36
     final_train_accuracy = min(0.99, metric.accuracy + 0.025)
-    final_train_recall = min(0.99, metric.recall + 0.035)
 
     for epoch in range(1, epochs + 1):
         progress = epoch / epochs
@@ -1106,8 +1036,6 @@ def build_training_history(metric: ModelMetric, epochs: int = 20) -> pd.DataFram
         val_loss = start_val_loss - (start_val_loss - final_val_loss) * progress**0.78
         train_accuracy = 0.53 + (final_train_accuracy - 0.53) * progress**0.74
         val_accuracy = 0.50 + (metric.accuracy - 0.50) * progress**0.82
-        train_recall = 0.45 + (final_train_recall - 0.45) * progress**0.70
-        val_recall = 0.42 + (metric.recall - 0.42) * progress**0.78
 
         rows.extend(
             (
@@ -1115,8 +1043,6 @@ def build_training_history(metric: ModelMetric, epochs: int = 20) -> pd.DataFram
                 {"epoch": epoch, "metric": "val_loss", "value": round(val_loss, 4)},
                 {"epoch": epoch, "metric": "train_accuracy", "value": round(train_accuracy, 4)},
                 {"epoch": epoch, "metric": "val_accuracy", "value": round(val_accuracy, 4)},
-                {"epoch": epoch, "metric": "train_recall", "value": round(train_recall, 4)},
-                {"epoch": epoch, "metric": "val_recall", "value": round(val_recall, 4)},
             )
         )
 
@@ -1270,18 +1196,12 @@ def render_training_charts(metric: ModelMetric) -> None:
     history_df = build_training_history(metric)
     loss_df = history_df[history_df["metric"].isin(("train_loss", "val_loss"))]
     accuracy_df = history_df[history_df["metric"].isin(("train_accuracy", "val_accuracy"))]
-    recall_df = history_df[history_df["metric"].isin(("train_recall", "val_recall"))]
-    epochs = sorted(history_df["epoch"].unique())
-    last_epoch = epochs[-1] if epochs else 0
-    epoch_axis_values = [epoch for epoch in epochs if epoch % 5 == 0]
-    if last_epoch and last_epoch not in epoch_axis_values:
-        epoch_axis_values.append(last_epoch)
 
     loss_chart = (
         alt.Chart(loss_df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(values=epoch_axis_values)),
+            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(tickMinStep=1)),
             y=alt.Y("value:Q", title="Loss"),
             color=alt.Color("metric:N", title="Curva"),
             tooltip=[
@@ -1297,24 +1217,8 @@ def render_training_charts(metric: ModelMetric) -> None:
         alt.Chart(accuracy_df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(values=epoch_axis_values)),
+            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(tickMinStep=1)),
             y=alt.Y("value:Q", title="Accuracy", scale=alt.Scale(domain=[0.45, 1.0])),
-            color=alt.Color("metric:N", title="Curva"),
-            tooltip=[
-                alt.Tooltip("epoch:Q", title="Epoch"),
-                alt.Tooltip("metric:N", title="Metrica"),
-                alt.Tooltip("value:Q", title="Valor", format=".4f"),
-            ],
-        )
-        .properties(height=310)
-    )
-
-    recall_chart = (
-        alt.Chart(recall_df)
-        .mark_line(point=True)
-        .encode(
-            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(values=epoch_axis_values)),
-            y=alt.Y("value:Q", title="Recall", scale=alt.Scale(domain=[0.0, 1.0])),
             color=alt.Color("metric:N", title="Curva"),
             tooltip=[
                 alt.Tooltip("epoch:Q", title="Epoch"),
@@ -1333,25 +1237,13 @@ def render_training_charts(metric: ModelMetric) -> None:
         st.subheader("Train accuracy vs Val accuracy")
         st.altair_chart(accuracy_chart, width="stretch")
 
-    st.subheader("Train recall vs Val recall")
-    st.altair_chart(recall_chart, width="stretch")
-
 
 def render_confusion_matrix(metric: ModelMetric) -> None:
     matrix_df = build_confusion_matrix(metric)
     threshold = matrix_df["Cantidad"].max() * 0.55
     base = alt.Chart(matrix_df).encode(
-        x=alt.X(
-            "Prediccion:N",
-            title="Prediccion",
-            sort=["No agresion", "Agresion"],
-            axis=alt.Axis(labelAngle=0),
-        ),
-        y=alt.Y(
-            "Real:N",
-            title="Clase real",
-            sort=["No agresion", "Agresion"],
-        ),
+        x=alt.X("Prediccion:N", title="Prediccion"),
+        y=alt.Y("Real:N", title="Clase real", sort=["Agresion", "No agresion"]),
         tooltip=[
             alt.Tooltip("Real:N"),
             alt.Tooltip("Prediccion:N"),
@@ -1365,9 +1257,7 @@ def render_confusion_matrix(metric: ModelMetric) -> None:
         text=alt.Text("Cantidad:Q"),
         color=alt.condition(alt.datum.Cantidad > threshold, alt.value("white"), alt.value("#111827")),
     )
-    centered_columns = st.columns([1, 2.1, 1], gap="small")
-    with centered_columns[1]:
-        st.altair_chart((heatmap + labels).properties(width=400, height=400), width="content")
+    st.altair_chart((heatmap + labels).properties(height=330), width="stretch")
 
 
 def render_auc_curves(metric: ModelMetric) -> None:

@@ -1,6 +1,5 @@
 [server]
 maxUploadSize = 500
-fileWatcherType = "none"
 
 [theme]
 base = "light"
