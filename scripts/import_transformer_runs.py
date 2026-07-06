@@ -44,15 +44,17 @@ def read_history(path: Path) -> list[dict[str, float | int]]:
     with path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
         for row in reader:
-            rows.append(
-                {
-                    "epoch": int(float(row["epoch"])),
-                    "train_loss": float(row["train_loss"]),
-                    "val_loss": float(row["valid_loss"]),
-                    "train_accuracy": float(row["train_accuracy"]),
-                    "val_accuracy": float(row["valid_accuracy"]),
-                }
-            )
+            history_row: dict[str, float | int] = {
+                "epoch": int(float(row["epoch"])),
+                "train_loss": float(row["train_loss"]),
+                "val_loss": float(row["valid_loss"]),
+                "train_accuracy": float(row["train_accuracy"]),
+                "val_accuracy": float(row["valid_accuracy"]),
+            }
+            if "train_recall" in row and "valid_recall" in row:
+                history_row["train_recall"] = float(row["train_recall"])
+                history_row["val_recall"] = float(row["valid_recall"])
+            rows.append(history_row)
     return rows
 
 
@@ -61,15 +63,17 @@ def read_keras_history(path: Path) -> list[dict[str, float | int]]:
     with path.open("r", encoding="utf-8", newline="") as file:
         reader = csv.DictReader(file)
         for epoch, row in enumerate(reader, start=1):
-            rows.append(
-                {
-                    "epoch": epoch,
-                    "train_loss": float(row["loss"]),
-                    "val_loss": float(row["val_loss"]),
-                    "train_accuracy": float(row["accuracy"]),
-                    "val_accuracy": float(row["val_accuracy"]),
-                }
-            )
+            history_row: dict[str, float | int] = {
+                "epoch": epoch,
+                "train_loss": float(row["loss"]),
+                "val_loss": float(row["val_loss"]),
+                "train_accuracy": float(row["accuracy"]),
+                "val_accuracy": float(row["val_accuracy"]),
+            }
+            if "recall" in row and "val_recall" in row:
+                history_row["train_recall"] = float(row["recall"])
+                history_row["val_recall"] = float(row["val_recall"])
+            rows.append(history_row)
     return rows
 
 

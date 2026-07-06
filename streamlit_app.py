@@ -1012,7 +1012,7 @@ def build_training_history(metric: ModelMetric, epochs: int = 20) -> pd.DataFram
 
         value_columns = [
             column
-            for column in ("train_loss", "val_loss", "train_accuracy", "val_accuracy")
+            for column in ("train_loss", "val_loss", "train_accuracy", "val_accuracy", "train_recall", "val_recall")
             if column in history_df.columns
         ]
         if "epoch" in history_df.columns and value_columns:
@@ -1029,6 +1029,7 @@ def build_training_history(metric: ModelMetric, epochs: int = 20) -> pd.DataFram
     start_train_loss = 1.28
     start_val_loss = 1.36
     final_train_accuracy = min(0.99, metric.accuracy + 0.025)
+    final_train_recall = min(0.99, metric.recall + 0.035)
 
     for epoch in range(1, epochs + 1):
         progress = epoch / epochs
@@ -1036,6 +1037,8 @@ def build_training_history(metric: ModelMetric, epochs: int = 20) -> pd.DataFram
         val_loss = start_val_loss - (start_val_loss - final_val_loss) * progress**0.78
         train_accuracy = 0.53 + (final_train_accuracy - 0.53) * progress**0.74
         val_accuracy = 0.50 + (metric.accuracy - 0.50) * progress**0.82
+        train_recall = 0.45 + (final_train_recall - 0.45) * progress**0.70
+        val_recall = 0.42 + (metric.recall - 0.42) * progress**0.78
 
         rows.extend(
             (
@@ -1043,6 +1046,8 @@ def build_training_history(metric: ModelMetric, epochs: int = 20) -> pd.DataFram
                 {"epoch": epoch, "metric": "val_loss", "value": round(val_loss, 4)},
                 {"epoch": epoch, "metric": "train_accuracy", "value": round(train_accuracy, 4)},
                 {"epoch": epoch, "metric": "val_accuracy", "value": round(val_accuracy, 4)},
+                {"epoch": epoch, "metric": "train_recall", "value": round(train_recall, 4)},
+                {"epoch": epoch, "metric": "val_recall", "value": round(val_recall, 4)},
             )
         )
 
@@ -1196,6 +1201,7 @@ def render_training_charts(metric: ModelMetric) -> None:
     history_df = build_training_history(metric)
     loss_df = history_df[history_df["metric"].isin(("train_loss", "val_loss"))]
     accuracy_df = history_df[history_df["metric"].isin(("train_accuracy", "val_accuracy"))]
+    recall_df = history_df[history_df["metric"].isin(("train_recall", "val_recall"))]
 
     loss_chart = (
         alt.Chart(loss_df)
@@ -1229,6 +1235,22 @@ def render_training_charts(metric: ModelMetric) -> None:
         .properties(height=310)
     )
 
+    recall_chart = (
+        alt.Chart(recall_df)
+        .mark_line(point=True)
+        .encode(
+            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(tickMinStep=1)),
+            y=alt.Y("value:Q", title="Recall", scale=alt.Scale(domain=[0.0, 1.0])),
+            color=alt.Color("metric:N", title="Curva"),
+            tooltip=[
+                alt.Tooltip("epoch:Q", title="Epoch"),
+                alt.Tooltip("metric:N", title="Metrica"),
+                alt.Tooltip("value:Q", title="Valor", format=".4f"),
+            ],
+        )
+        .properties(height=310)
+    )
+
     left_column, right_column = st.columns(2, gap="large")
     with left_column:
         st.subheader("Train loss vs Val loss")
@@ -1236,6 +1258,9 @@ def render_training_charts(metric: ModelMetric) -> None:
     with right_column:
         st.subheader("Train accuracy vs Val accuracy")
         st.altair_chart(accuracy_chart, width="stretch")
+
+    st.subheader("Train recall vs Val recall")
+    st.altair_chart(recall_chart, width="stretch")
 
 
 def render_confusion_matrix(metric: ModelMetric) -> None:
