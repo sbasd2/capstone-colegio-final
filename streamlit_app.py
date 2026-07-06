@@ -640,19 +640,64 @@ def resolve_movinet_model_path(metric: ModelMetric) -> Path:
     raise FileNotFoundError(f"No se encontro modelo local ni repo_id para {metric.name}.")
 
 
-@st.cache_resource(show_spinner=False)
+def repair_videomae_attention_biases(model, checkpoint_dir: Path) -> None:
+    import torch
+    from safetensors import safe_open
+
+    checkpoint_file = checkpoint_dir / "model.safetensors"
+    encoder = getattr(getattr(model, "videomae", None), "encoder", None)
+    layers = getattr(encoder, "layer", None)
+    if layers is None or not checkpoint_file.exists():
+        return
+
+    with safe_open(str(checkpoint_file), framework="pt", device="cpu") as tensors:
+        tensor_keys = set(tensors.keys())
+        with torch.no_grad():
+            for layer_index, layer in enumerate(layers):
+                attention = getattr(getattr(layer, "attention", None), "attention", None)
+                if attention is None:
+                    continue
+
+                for checkpoint_suffix, parameter_name in (
+                    ("query.bias", "q_bias"),
+                    ("value.bias", "v_bias"),
+                ):
+                    parameter = getattr(attention, parameter_name, None)
+                    if parameter is None:
+                        continue
+
+                    checkpoint_key = (
+                        f"videomae.encoder.layer.{layer_index}."
+                        f"attention.attention.{checkpoint_suffix}"
+                    )
+                    if checkpoint_key in tensor_keys:
+                        checkpoint_tensor = tensors.get_tensor(checkpoint_key).to(
+                            device=parameter.device,
+                            dtype=parameter.dtype,
+                        )
+                        if checkpoint_tensor.shape == parameter.shape:
+                            parameter.copy_(checkpoint_tensor)
+
+                    if not torch.isfinite(parameter).all():
+                        parameter.zero_()
+
+
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_video_model(checkpoint_dir: str):
     from transformers import AutoModelForVideoClassification
 
+    checkpoint_path = Path(checkpoint_dir)
     model = AutoModelForVideoClassification.from_pretrained(
-        checkpoint_dir,
+        checkpoint_path,
         local_files_only=True,
     )
+    repair_videomae_attention_biases(model, checkpoint_path)
+    model.float()
     model.eval()
     return model
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_movinet_model(model_path: str):
     import keras
     import tensorflow_hub as hub
@@ -670,7 +715,7 @@ def load_movinet_model(model_path: str):
     )
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_keras_model(model_path: str):
     import keras
 
@@ -777,7 +822,13 @@ def score_with_transformers(video_bytes: bytes, metric: ModelMetric) -> float:
 
     with torch.inference_mode():
         outputs = model(pixel_values=pixel_values)
-        probabilities = torch.softmax(outputs.logits, dim=-1)[0].detach().cpu().numpy()
+        logits = outputs.logits
+        if not torch.isfinite(logits).all():
+            raise ValueError(f"{metric.name} devolvio logits invalidos (NaN o Inf).")
+        probabilities = torch.softmax(logits, dim=-1)[0].detach().cpu().numpy()
+
+    if not np.isfinite(probabilities).all():
+        raise ValueError(f"{metric.name} devolvio probabilidades invalidas (NaN o Inf).")
 
     return float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
 
@@ -790,12 +841,17 @@ def score_with_movinet(video_bytes: bytes, metric: ModelMetric) -> float:
     model = load_movinet_model(str(model_path)) if metric.id == "movinet_a2" else load_keras_model(str(model_path))
     output = model(tf.convert_to_tensor(video_batch, dtype=tf.float32), training=False)
     scores = np.asarray(output).reshape(-1)
+    if not np.isfinite(scores).all():
+        raise ValueError(f"{metric.name} devolvio scores invalidos (NaN o Inf).")
 
     if scores.size == 1:
         return float(np.clip(scores[0], 0.0, 1.0))
 
     shifted_scores = scores - np.max(scores)
     probabilities = np.exp(shifted_scores) / np.exp(shifted_scores).sum()
+    if not np.isfinite(probabilities).all():
+        raise ValueError(f"{metric.name} devolvio probabilidades invalidas (NaN o Inf).")
+
     return float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
 
 
@@ -806,6 +862,9 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
         aggression_score = score_with_movinet(video_bytes, metric)
     else:
         raise NotImplementedError(f"No hay inferencia configurada para {metric.name}.")
+
+    if not np.isfinite(aggression_score):
+        raise ValueError("El score de agresion no es valido (NaN o Inf).")
 
     threshold = metric.threshold if metric.threshold is not None else 0.5
     predicted_aggression = aggression_score >= threshold
@@ -944,6 +1003,11 @@ def render_video_module() -> None:
         [metric.name for metric in inference_models],
     )
     registered_model = next(metric for metric in inference_models if metric.name == selected_model)
+
+    previous_model_id = st.session_state.get("active_inference_model_id")
+    if previous_model_id and previous_model_id != registered_model.id:
+        st.cache_resource.clear()
+    st.session_state["active_inference_model_id"] = registered_model.id
 
     if metrics_only_models:
         st.info(
