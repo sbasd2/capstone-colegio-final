@@ -16,6 +16,8 @@ SUPPORTED_VIDEO_TYPES = ("mp4", "mov", "avi", "mkv", "webm")
 BASE_DIR = Path(__file__).resolve().parent
 METRICS_FILE = BASE_DIR / "metrics" / "model_metrics.json"
 MOVINET_A2_TFHUB_URL = "https://tfhub.dev/tensorflow/movinet/a2/base/kinetics-600/classification/3"
+MODEL_CACHE_VERSION = "2026-07-06-finite-video-models"
+SHOW_CACHE_CLEAR_BUTTON = False
 
 
 @dataclass(frozen=True)
@@ -24,6 +26,8 @@ class Verdict:
     confidence: float
     risk_level: str
     accent: str
+    aggression_score: float
+    threshold: float
 
 
 @dataclass(frozen=True)
@@ -570,11 +574,17 @@ def render_sidebar() -> str:
         unsafe_allow_html=True,
     )
 
-    return st.sidebar.radio(
+    selected_module = st.sidebar.radio(
         "Modulo",
         ("Seleccionar video", "Metricas"),
         label_visibility="collapsed",
     )
+
+    if SHOW_CACHE_CLEAR_BUTTON and st.sidebar.button("Limpiar cache de modelos"):
+        st.cache_resource.clear()
+        st.rerun()
+
+    return selected_module
 
 
 def file_size_mb(uploaded_file: BinaryIO) -> float:
@@ -641,7 +651,8 @@ def resolve_movinet_model_path(metric: ModelMetric) -> Path:
 
 
 @st.cache_resource(show_spinner=False)
-def load_video_model(checkpoint_dir: str):
+def load_video_model(checkpoint_dir: str, cache_version: str = MODEL_CACHE_VERSION):
+    import torch
     from transformers import AutoModelForVideoClassification
 
     model = AutoModelForVideoClassification.from_pretrained(
@@ -649,6 +660,14 @@ def load_video_model(checkpoint_dir: str):
         local_files_only=True,
     )
     model.eval()
+
+    with torch.no_grad():
+        for parameter_name, parameter in model.named_parameters():
+            if not torch.isfinite(parameter).all():
+                raise ValueError(
+                    f"El checkpoint tiene pesos invalidos (NaN o Inf) en {parameter_name}."
+                )
+
     return model
 
 
@@ -773,11 +792,20 @@ def score_with_transformers(video_bytes: bytes, metric: ModelMetric) -> float:
 
     checkpoint_dir = resolve_transformer_checkpoint(metric)
     pixel_values = preprocess_video_for_model(video_bytes, metric)
-    model = load_video_model(str(checkpoint_dir))
+    model = load_video_model(str(checkpoint_dir), MODEL_CACHE_VERSION)
 
     with torch.inference_mode():
         outputs = model(pixel_values=pixel_values)
-        probabilities = torch.softmax(outputs.logits, dim=-1)[0].detach().cpu().numpy()
+        logits = outputs.logits
+        if not torch.isfinite(logits).all():
+            raise ValueError(
+                "El modelo devolvio logits invalidos (NaN o Inf). "
+                "Revisa el checkpoint descargado y la compatibilidad de los pesos."
+            )
+        probabilities = torch.softmax(logits, dim=-1)[0].detach().cpu().numpy()
+
+    if not np.isfinite(probabilities).all():
+        raise ValueError("El modelo devolvio probabilidades invalidas (NaN o Inf).")
 
     return float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
 
@@ -790,12 +818,17 @@ def score_with_movinet(video_bytes: bytes, metric: ModelMetric) -> float:
     model = load_movinet_model(str(model_path)) if metric.id == "movinet_a2" else load_keras_model(str(model_path))
     output = model(tf.convert_to_tensor(video_batch, dtype=tf.float32), training=False)
     scores = np.asarray(output).reshape(-1)
+    if not np.isfinite(scores).all():
+        raise ValueError("El modelo devolvio scores invalidos (NaN o Inf).")
 
     if scores.size == 1:
         return float(np.clip(scores[0], 0.0, 1.0))
 
     shifted_scores = scores - np.max(scores)
     probabilities = np.exp(shifted_scores) / np.exp(shifted_scores).sum()
+    if not np.isfinite(probabilities).all():
+        raise ValueError("El modelo devolvio probabilidades invalidas (NaN o Inf).")
+
     return float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
 
 
@@ -807,6 +840,9 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
     else:
         raise NotImplementedError(f"No hay inferencia configurada para {metric.name}.")
 
+    if not np.isfinite(aggression_score):
+        raise ValueError("El score de agresion no es valido (NaN o Inf).")
+
     threshold = metric.threshold if metric.threshold is not None else 0.5
     predicted_aggression = aggression_score >= threshold
 
@@ -816,6 +852,8 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
             confidence=round(aggression_score * 100, 1),
             risk_level="Alto",
             accent="danger",
+            aggression_score=aggression_score,
+            threshold=threshold,
         )
 
     return Verdict(
@@ -823,6 +861,8 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
         confidence=round((1 - aggression_score) * 100, 1),
         risk_level="Bajo",
         accent="safe",
+        aggression_score=aggression_score,
+        threshold=threshold,
     )
 
 
@@ -868,6 +908,8 @@ def render_verdict(verdict: Verdict | None) -> None:
             <div class="metric-row">
                 <div class="metric-box"><span>Confianza</span><strong>{verdict.confidence:.1f}%</strong></div>
                 <div class="metric-box"><span>Nivel</span><strong>{verdict.risk_level}</strong></div>
+                <div class="metric-box"><span>Score agresion</span><strong>{verdict.aggression_score:.4f}</strong></div>
+                <div class="metric-box"><span>Umbral</span><strong>{verdict.threshold:.4f}</strong></div>
             </div>
         </div>
         """,
