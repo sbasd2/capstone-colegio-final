@@ -16,6 +16,7 @@ SUPPORTED_VIDEO_TYPES = ("mp4", "mov", "avi", "mkv", "webm")
 BASE_DIR = Path(__file__).resolve().parent
 METRICS_FILE = BASE_DIR / "metrics" / "model_metrics.json"
 MOVINET_A2_TFHUB_URL = "https://tfhub.dev/tensorflow/movinet/a2/base/kinetics-600/classification/3"
+ACTIVE_MODEL_IDS = ("videomae",)
 
 
 @dataclass(frozen=True)
@@ -126,6 +127,7 @@ def load_model_metrics() -> tuple[ModelMetric, ...]:
 
 
 MODEL_METRICS = load_model_metrics()
+APP_MODEL_METRICS = tuple(metric for metric in MODEL_METRICS if metric.id in ACTIVE_MODEL_IDS)
 COMPARISON_METRIC_LABELS = ("Accuracy", "Precision", "Recall", "F1-score", "ROC-AUC", "PR-AUC")
 
 
@@ -765,7 +767,13 @@ def score_with_transformers(video_bytes: bytes, metric: ModelMetric) -> float:
 
     with torch.inference_mode():
         outputs = model(pixel_values=pixel_values)
-        probabilities = torch.softmax(outputs.logits, dim=-1)[0].detach().cpu().numpy()
+        logits = outputs.logits
+        if not torch.isfinite(logits).all():
+            raise ValueError("VideoMAE devolvio logits invalidos (NaN o Inf).")
+        probabilities = torch.softmax(logits, dim=-1)[0].detach().cpu().numpy()
+
+    if not np.isfinite(probabilities).all():
+        raise ValueError("VideoMAE devolvio probabilidades invalidas (NaN o Inf).")
 
     return float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
 
@@ -794,6 +802,9 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
         aggression_score = score_with_movinet(video_bytes, metric)
     else:
         raise NotImplementedError(f"No hay inferencia configurada para {metric.name}.")
+
+    if not np.isfinite(aggression_score):
+        raise ValueError("El score de agresion no es valido (NaN o Inf).")
 
     threshold = metric.threshold if metric.threshold is not None else 0.5
     predicted_aggression = aggression_score >= threshold
@@ -920,25 +931,13 @@ def render_video_module() -> None:
         "Modelo conectado",
     )
 
-    inference_models = [metric for metric in MODEL_METRICS if has_video_inference(metric)]
-    metrics_only_models = [metric.name for metric in MODEL_METRICS if not has_video_inference(metric)]
+    inference_models = [metric for metric in APP_MODEL_METRICS if has_video_inference(metric)]
 
     if not inference_models:
         st.warning("No hay modelos con inferencia disponible en este entorno.")
         return
 
-    selected_model = st.selectbox(
-        "Modelo para inferencia",
-        [metric.name for metric in inference_models],
-    )
-    registered_model = next(metric for metric in inference_models if metric.name == selected_model)
-
-    if metrics_only_models:
-        st.info(
-            "Modelos solo disponibles en metricas por ahora: "
-            + ", ".join(metrics_only_models)
-            + "."
-        )
+    registered_model = inference_models[0]
 
     left_column, right_column = st.columns([1.45, 1], gap="large")
 
@@ -1118,7 +1117,7 @@ def build_comparison_table() -> pd.DataFrame:
                 "ROC-AUC": round(metric.roc_auc, 4),
                 "PR-AUC": round(metric.pr_auc, 4),
             }
-            for metric in MODEL_METRICS
+            for metric in APP_MODEL_METRICS
         ]
     )
 
@@ -1159,7 +1158,7 @@ def render_comparison_chart(comparison_df: pd.DataFrame) -> None:
             x=alt.X(
                 "Modelo:N",
                 title="Modelo",
-                sort=[metric.name for metric in MODEL_METRICS],
+                sort=[metric.name for metric in APP_MODEL_METRICS],
                 axis=alt.Axis(labelAngle=0),
             ),
             xOffset=alt.XOffset("Metrica:N", sort=list(COMPARISON_METRIC_LABELS)),
@@ -1307,12 +1306,11 @@ def render_metrics_module() -> None:
         "Metricas desde JSON",
     )
 
-    selected_model = st.selectbox(
-        "Modelo",
-        [metric.name for metric in MODEL_METRICS],
-        index=min(2, len(MODEL_METRICS) - 1),
-    )
-    metric = next(metric for metric in MODEL_METRICS if metric.name == selected_model)
+    if not APP_MODEL_METRICS:
+        st.warning("No hay metricas disponibles para el modelo activo.")
+        return
+
+    metric = APP_MODEL_METRICS[0]
 
     render_kpis(metric)
     st.divider()
