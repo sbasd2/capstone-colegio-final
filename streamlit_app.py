@@ -1202,12 +1202,21 @@ def render_training_charts(metric: ModelMetric) -> None:
     loss_df = history_df[history_df["metric"].isin(("train_loss", "val_loss"))]
     accuracy_df = history_df[history_df["metric"].isin(("train_accuracy", "val_accuracy"))]
     recall_df = history_df[history_df["metric"].isin(("train_recall", "val_recall"))]
+    recall_epochs = sorted(recall_df["epoch"].unique())
+    last_recall_epoch = recall_epochs[-1] if recall_epochs else 0
+    recall_axis_values = [epoch for epoch in recall_epochs if epoch % 5 == 0]
+    if last_recall_epoch and last_recall_epoch not in recall_axis_values:
+        recall_axis_values.append(last_recall_epoch)
+    recall_df = recall_df[
+        (recall_df["epoch"] % 5 == 0)
+        | (recall_df["epoch"] == last_recall_epoch)
+    ]
 
     loss_chart = (
         alt.Chart(loss_df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(tickMinStep=1)),
+            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(values=recall_axis_values)),
             y=alt.Y("value:Q", title="Loss"),
             color=alt.Color("metric:N", title="Curva"),
             tooltip=[
@@ -1267,8 +1276,17 @@ def render_confusion_matrix(metric: ModelMetric) -> None:
     matrix_df = build_confusion_matrix(metric)
     threshold = matrix_df["Cantidad"].max() * 0.55
     base = alt.Chart(matrix_df).encode(
-        x=alt.X("Prediccion:N", title="Prediccion", axis=alt.Axis(labelAngle=0)),
-        y=alt.Y("Real:N", title="Clase real", sort=["Agresion", "No agresion"]),
+        x=alt.X(
+            "Prediccion:N",
+            title="Prediccion",
+            sort=["No agresion", "Agresion"],
+            axis=alt.Axis(labelAngle=0),
+        ),
+        y=alt.Y(
+            "Real:N",
+            title="Clase real",
+            sort=["No agresion", "Agresion"],
+        ),
         tooltip=[
             alt.Tooltip("Real:N"),
             alt.Tooltip("Prediccion:N"),
@@ -1282,7 +1300,9 @@ def render_confusion_matrix(metric: ModelMetric) -> None:
         text=alt.Text("Cantidad:Q"),
         color=alt.condition(alt.datum.Cantidad > threshold, alt.value("white"), alt.value("#111827")),
     )
-    st.altair_chart((heatmap + labels).properties(width=360, height=360), width="content")
+    centered_columns = st.columns([1, 2.1, 1], gap="small")
+    with centered_columns[1]:
+        st.altair_chart((heatmap + labels).properties(width=440, height=440), width="content")
 
 
 def render_auc_curves(metric: ModelMetric) -> None:
