@@ -9,7 +9,6 @@ from typing import Any
 ROOT = Path(r"C:\Users\SEBAS\PycharmProjects\YoloModel")
 OUTPUT = Path(__file__).resolve().parents[1] / "metrics" / "model_metrics.json"
 MOVINET_DIR = Path(__file__).resolve().parents[1] / "models" / "movinet_a2_cctv_direct_finetuning"
-MOBILENET_BIGRU_DIR = Path(__file__).resolve().parents[1] / "models" / "runs_mobilenetv3_bigru_cctv"
 
 RUNS = (
     {
@@ -194,71 +193,12 @@ def build_movinet_entry() -> dict[str, Any] | None:
     }
 
 
-def build_mobilenet_bigru_entry() -> dict[str, Any] | None:
-    metrics_path = MOBILENET_BIGRU_DIR / "final_metrics.json"
-    history_path = MOBILENET_BIGRU_DIR / "history.csv"
-    config_path = MOBILENET_BIGRU_DIR / "cctv_decision_config.json"
-    model_path = MOBILENET_BIGRU_DIR / "best_mobilenetv3_bigru_cctv.keras"
-    if not metrics_path.exists() or not history_path.exists() or not config_path.exists() or not model_path.exists():
-        return None
-
-    metrics = read_json(metrics_path)
-    config = read_json(config_path)
-    matrix = metrics["confusion_matrix"]
-    true_negative, false_positive = matrix[0]
-    false_negative, true_positive = matrix[1]
-    precision = true_positive / (true_positive + false_positive)
-    recall = true_positive / (true_positive + false_negative)
-
-    return {
-        "id": "mobilenetv3_bigru",
-        "name": "MobileNetV3Small + BiGRU",
-        "type": "Video",
-        "status": "Entrenado",
-        "framework": "Keras 3 / TensorFlow",
-        "model_path": "",
-        "checkpoint_dir": "",
-        "repo_id": "inicial-tope/capstone-mobilenetv3-bigru-cctv",
-        "hf_filename": "best_mobilenetv3_bigru_cctv.keras",
-        "summary": {
-            "accuracy": accuracy_from_confusion(matrix),
-            "precision": precision,
-            "recall": recall,
-            "f1_score": metrics["test_f1_at_valid_threshold"],
-            "roc_auc": metrics["test_roc_auc"],
-            "pr_auc": metrics["test_pr_auc"],
-        },
-        "decision": {
-            "threshold": metrics["threshold_from_valid"],
-            "threshold_selected_on": config.get("threshold_selected_on", "valid"),
-            "threshold_metric": metrics["threshold_metric"],
-        },
-        "preprocessing": {
-            "input_size": [config["image_size"], config["image_size"]],
-            "num_frames": config["num_frames"],
-            "input_range": config["input_range"],
-            "input_layout": "B,T,H,W,C",
-        },
-        "labels": {
-            "0": "No agresion",
-            "1": "Agresion",
-            "raw_class_names": config["class_names"],
-        },
-        "confusion_matrix": confusion_rows(matrix),
-        "history": read_keras_history(history_path),
-        "notes": "Metrics imported from Keras MobileNetV3Small + BiGRU run.",
-    }
-
-
 def main() -> None:
     OUTPUT.parent.mkdir(parents=True, exist_ok=True)
     models = [build_model_entry(run) for run in RUNS]
     movinet_entry = build_movinet_entry()
     if movinet_entry is not None:
         models.append(movinet_entry)
-    mobilenet_bigru_entry = build_mobilenet_bigru_entry()
-    if mobilenet_bigru_entry is not None:
-        models.append(mobilenet_bigru_entry)
 
     payload = {
         "source": str(ROOT),
