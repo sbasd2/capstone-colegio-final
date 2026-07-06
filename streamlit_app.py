@@ -581,7 +581,7 @@ def render_sidebar() -> str:
     )
 
     if SHOW_CACHE_CLEAR_BUTTON and st.sidebar.button("Limpiar cache de modelos"):
-        st.cache_resource.clear()
+        release_model_memory()
         st.rerun()
 
     return selected_module
@@ -602,6 +602,34 @@ def get_hf_token() -> str | None:
         token = ""
 
     return str(token).strip() or None
+
+
+def release_model_memory() -> None:
+    import sys
+
+    st.cache_resource.clear()
+
+    try:
+        import gc
+
+        gc.collect()
+    except Exception:
+        pass
+
+    torch = sys.modules.get("torch")
+    if torch is not None:
+        try:
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
+        except Exception:
+            pass
+
+    tf = sys.modules.get("tensorflow")
+    if tf is not None:
+        try:
+            tf.keras.backend.clear_session()
+        except Exception:
+            pass
 
 
 @st.cache_resource(show_spinner=False)
@@ -650,19 +678,23 @@ def resolve_movinet_model_path(metric: ModelMetric) -> Path:
     raise FileNotFoundError(f"No se encontro modelo local ni repo_id para {metric.name}.")
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_video_model(checkpoint_dir: str, cache_version: str = MODEL_CACHE_VERSION):
+    import torch
     from transformers import AutoModelForVideoClassification
 
+    torch.set_num_threads(min(2, max(1, torch.get_num_threads())))
     model = AutoModelForVideoClassification.from_pretrained(
         checkpoint_dir,
         local_files_only=True,
+        attn_implementation="eager",
     )
+    model.float()
     model.eval()
     return model
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_movinet_model(model_path: str):
     import keras
     import tensorflow_hub as hub
@@ -680,7 +712,7 @@ def load_movinet_model(model_path: str):
     )
 
 
-@st.cache_resource(show_spinner=False)
+@st.cache_resource(show_spinner=False, max_entries=1)
 def load_keras_model(model_path: str):
     import keras
 
@@ -977,6 +1009,10 @@ def render_video_module() -> None:
         [metric.name for metric in inference_models],
     )
     registered_model = next(metric for metric in inference_models if metric.name == selected_model)
+    previous_model_id = st.session_state.get("active_inference_model_id")
+    if previous_model_id and previous_model_id != registered_model.id:
+        release_model_memory()
+    st.session_state["active_inference_model_id"] = registered_model.id
 
     if metrics_only_models:
         st.info(
