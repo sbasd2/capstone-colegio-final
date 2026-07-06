@@ -1242,7 +1242,7 @@ def render_confusion_matrix(metric: ModelMetric) -> None:
     matrix_df = build_confusion_matrix(metric)
     threshold = matrix_df["Cantidad"].max() * 0.55
     base = alt.Chart(matrix_df).encode(
-        x=alt.X("Prediccion:N", title="Prediccion"),
+        x=alt.X("Prediccion:N", title="Prediccion", axis=alt.Axis(labelAngle=0)),
         y=alt.Y("Real:N", title="Clase real", sort=["Agresion", "No agresion"]),
         tooltip=[
             alt.Tooltip("Real:N"),
@@ -1257,7 +1257,7 @@ def render_confusion_matrix(metric: ModelMetric) -> None:
         text=alt.Text("Cantidad:Q"),
         color=alt.condition(alt.datum.Cantidad > threshold, alt.value("white"), alt.value("#111827")),
     )
-    st.altair_chart((heatmap + labels).properties(height=330), width="stretch")
+    st.altair_chart((heatmap + labels).properties(width=360, height=360), width="content")
 
 
 def render_auc_curves(metric: ModelMetric) -> None:
