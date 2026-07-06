@@ -1202,21 +1202,17 @@ def render_training_charts(metric: ModelMetric) -> None:
     loss_df = history_df[history_df["metric"].isin(("train_loss", "val_loss"))]
     accuracy_df = history_df[history_df["metric"].isin(("train_accuracy", "val_accuracy"))]
     recall_df = history_df[history_df["metric"].isin(("train_recall", "val_recall"))]
-    recall_epochs = sorted(recall_df["epoch"].unique())
-    last_recall_epoch = recall_epochs[-1] if recall_epochs else 0
-    recall_axis_values = [epoch for epoch in recall_epochs if epoch % 5 == 0]
-    if last_recall_epoch and last_recall_epoch not in recall_axis_values:
-        recall_axis_values.append(last_recall_epoch)
-    recall_df = recall_df[
-        (recall_df["epoch"] % 5 == 0)
-        | (recall_df["epoch"] == last_recall_epoch)
-    ]
+    epochs = sorted(history_df["epoch"].unique())
+    last_epoch = epochs[-1] if epochs else 0
+    epoch_axis_values = [epoch for epoch in epochs if epoch % 5 == 0]
+    if last_epoch and last_epoch not in epoch_axis_values:
+        epoch_axis_values.append(last_epoch)
 
     loss_chart = (
         alt.Chart(loss_df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(values=recall_axis_values)),
+            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(values=epoch_axis_values)),
             y=alt.Y("value:Q", title="Loss"),
             color=alt.Color("metric:N", title="Curva"),
             tooltip=[
@@ -1232,7 +1228,7 @@ def render_training_charts(metric: ModelMetric) -> None:
         alt.Chart(accuracy_df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(tickMinStep=1)),
+            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(values=epoch_axis_values)),
             y=alt.Y("value:Q", title="Accuracy", scale=alt.Scale(domain=[0.45, 1.0])),
             color=alt.Color("metric:N", title="Curva"),
             tooltip=[
@@ -1248,7 +1244,7 @@ def render_training_charts(metric: ModelMetric) -> None:
         alt.Chart(recall_df)
         .mark_line(point=True)
         .encode(
-            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(tickMinStep=1)),
+            x=alt.X("epoch:Q", title="Epoch", axis=alt.Axis(values=epoch_axis_values)),
             y=alt.Y("value:Q", title="Recall", scale=alt.Scale(domain=[0.0, 1.0])),
             color=alt.Color("metric:N", title="Curva"),
             tooltip=[
@@ -1302,7 +1298,7 @@ def render_confusion_matrix(metric: ModelMetric) -> None:
     )
     centered_columns = st.columns([1, 2.1, 1], gap="small")
     with centered_columns[1]:
-        st.altair_chart((heatmap + labels).properties(width=440, height=440), width="content")
+        st.altair_chart((heatmap + labels).properties(width=400, height=400), width="content")
 
 
 def render_auc_curves(metric: ModelMetric) -> None:
