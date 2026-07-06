@@ -16,7 +16,6 @@ SUPPORTED_VIDEO_TYPES = ("mp4", "mov", "avi", "mkv", "webm")
 BASE_DIR = Path(__file__).resolve().parent
 METRICS_FILE = BASE_DIR / "metrics" / "model_metrics.json"
 MOVINET_A2_TFHUB_URL = "https://tfhub.dev/tensorflow/movinet/a2/base/kinetics-600/classification/3"
-ACTIVE_MODEL_IDS = ("videomae",)
 
 
 @dataclass(frozen=True)
@@ -48,6 +47,7 @@ class ModelMetric:
     checkpoint_dir: str = ""
     repo_id: str = ""
     hf_filename: str = ""
+    input_range: str = "[0,1]"
     threshold: float | None = None
     num_frames: int | None = None
     image_size: int | None = None
@@ -117,6 +117,7 @@ def load_model_metrics() -> tuple[ModelMetric, ...]:
                 checkpoint_dir=str(raw_model.get("checkpoint_dir") or ""),
                 repo_id=str(raw_model.get("repo_id") or ""),
                 hf_filename=str(raw_model.get("hf_filename") or ""),
+                input_range=str(preprocessing.get("input_range") or "[0,1]"),
                 threshold=safe_float(decision.get("threshold"), 0.0) if "threshold" in decision else None,
                 num_frames=int(preprocessing["num_frames"]) if "num_frames" in preprocessing else None,
                 image_size=int(input_size[0]) if input_size else None,
@@ -127,7 +128,6 @@ def load_model_metrics() -> tuple[ModelMetric, ...]:
 
 
 MODEL_METRICS = load_model_metrics()
-APP_MODEL_METRICS = tuple(metric for metric in MODEL_METRICS if metric.id in ACTIVE_MODEL_IDS)
 COMPARISON_METRIC_LABELS = ("Accuracy", "Precision", "Recall", "F1-score", "ROC-AUC", "PR-AUC")
 
 
@@ -640,60 +640,14 @@ def resolve_movinet_model_path(metric: ModelMetric) -> Path:
     raise FileNotFoundError(f"No se encontro modelo local ni repo_id para {metric.name}.")
 
 
-def repair_videomae_attention_biases(model, checkpoint_dir: Path) -> None:
-    import torch
-    from safetensors import safe_open
-
-    checkpoint_file = checkpoint_dir / "model.safetensors"
-    encoder = getattr(getattr(model, "videomae", None), "encoder", None)
-    layers = getattr(encoder, "layer", None)
-    if layers is None or not checkpoint_file.exists():
-        return
-
-    with safe_open(str(checkpoint_file), framework="pt", device="cpu") as tensors:
-        tensor_keys = set(tensors.keys())
-        with torch.no_grad():
-            for layer_index, layer in enumerate(layers):
-                attention = getattr(getattr(layer, "attention", None), "attention", None)
-                if attention is None:
-                    continue
-
-                bias_mappings = (
-                    ("query.bias", "q_bias"),
-                    ("value.bias", "v_bias"),
-                )
-                for checkpoint_suffix, parameter_name in bias_mappings:
-                    parameter = getattr(attention, parameter_name, None)
-                    if parameter is None:
-                        continue
-
-                    checkpoint_key = (
-                        f"videomae.encoder.layer.{layer_index}."
-                        f"attention.attention.{checkpoint_suffix}"
-                    )
-                    if checkpoint_key in tensor_keys:
-                        checkpoint_tensor = tensors.get_tensor(checkpoint_key).to(
-                            device=parameter.device,
-                            dtype=parameter.dtype,
-                        )
-                        if checkpoint_tensor.shape == parameter.shape:
-                            parameter.copy_(checkpoint_tensor)
-
-                    if not torch.isfinite(parameter).all():
-                        parameter.zero_()
-
-
-@st.cache_resource(show_spinner=False, max_entries=1)
+@st.cache_resource(show_spinner=False)
 def load_video_model(checkpoint_dir: str):
     from transformers import AutoModelForVideoClassification
 
-    checkpoint_path = Path(checkpoint_dir)
     model = AutoModelForVideoClassification.from_pretrained(
-        checkpoint_path,
+        checkpoint_dir,
         local_files_only=True,
     )
-    repair_videomae_attention_biases(model, checkpoint_path)
-    model.float()
     model.eval()
     return model
 
@@ -714,6 +668,13 @@ def load_movinet_model(model_path: str):
         safe_mode=False,
         compile=False,
     )
+
+
+@st.cache_resource(show_spinner=False)
+def load_keras_model(model_path: str):
+    import keras
+
+    return keras.models.load_model(model_path, compile=False)
 
 
 def write_uploaded_video(video_bytes: bytes) -> Path:
@@ -801,6 +762,9 @@ def preprocess_video_for_keras(video_bytes: bytes, metric: ModelMetric) -> np.nd
         except OSError:
             pass
 
+    if metric.input_range == "[-1,1]":
+        frames = (frames * 2.0) - 1.0
+
     return np.expand_dims(frames.astype(np.float32), axis=0)
 
 
@@ -813,13 +777,7 @@ def score_with_transformers(video_bytes: bytes, metric: ModelMetric) -> float:
 
     with torch.inference_mode():
         outputs = model(pixel_values=pixel_values)
-        logits = outputs.logits
-        if not torch.isfinite(logits).all():
-            raise ValueError("VideoMAE devolvio logits invalidos (NaN o Inf).")
-        probabilities = torch.softmax(logits, dim=-1)[0].detach().cpu().numpy()
-
-    if not np.isfinite(probabilities).all():
-        raise ValueError("VideoMAE devolvio probabilidades invalidas (NaN o Inf).")
+        probabilities = torch.softmax(outputs.logits, dim=-1)[0].detach().cpu().numpy()
 
     return float(probabilities[1]) if len(probabilities) > 1 else float(probabilities[0])
 
@@ -829,7 +787,7 @@ def score_with_movinet(video_bytes: bytes, metric: ModelMetric) -> float:
 
     model_path = resolve_movinet_model_path(metric)
     video_batch = preprocess_video_for_keras(video_bytes, metric)
-    model = load_movinet_model(str(model_path))
+    model = load_movinet_model(str(model_path)) if metric.id == "movinet_a2" else load_keras_model(str(model_path))
     output = model(tf.convert_to_tensor(video_batch, dtype=tf.float32), training=False)
     scores = np.asarray(output).reshape(-1)
 
@@ -848,9 +806,6 @@ def predict_video_aggression(video_bytes: bytes, metric: ModelMetric) -> Verdict
         aggression_score = score_with_movinet(video_bytes, metric)
     else:
         raise NotImplementedError(f"No hay inferencia configurada para {metric.name}.")
-
-    if not np.isfinite(aggression_score):
-        raise ValueError("El score de agresion no es valido (NaN o Inf).")
 
     threshold = metric.threshold if metric.threshold is not None else 0.5
     predicted_aggression = aggression_score >= threshold
@@ -977,13 +932,25 @@ def render_video_module() -> None:
         "Modelo conectado",
     )
 
-    inference_models = [metric for metric in APP_MODEL_METRICS if has_video_inference(metric)]
+    inference_models = [metric for metric in MODEL_METRICS if has_video_inference(metric)]
+    metrics_only_models = [metric.name for metric in MODEL_METRICS if not has_video_inference(metric)]
 
     if not inference_models:
         st.warning("No hay modelos con inferencia disponible en este entorno.")
         return
 
-    registered_model = inference_models[0]
+    selected_model = st.selectbox(
+        "Modelo para inferencia",
+        [metric.name for metric in inference_models],
+    )
+    registered_model = next(metric for metric in inference_models if metric.name == selected_model)
+
+    if metrics_only_models:
+        st.info(
+            "Modelos solo disponibles en metricas por ahora: "
+            + ", ".join(metrics_only_models)
+            + "."
+        )
 
     left_column, right_column = st.columns([1.45, 1], gap="large")
 
@@ -1163,7 +1130,7 @@ def build_comparison_table() -> pd.DataFrame:
                 "ROC-AUC": round(metric.roc_auc, 4),
                 "PR-AUC": round(metric.pr_auc, 4),
             }
-            for metric in APP_MODEL_METRICS
+            for metric in MODEL_METRICS
         ]
     )
 
@@ -1204,7 +1171,7 @@ def render_comparison_chart(comparison_df: pd.DataFrame) -> None:
             x=alt.X(
                 "Modelo:N",
                 title="Modelo",
-                sort=[metric.name for metric in APP_MODEL_METRICS],
+                sort=[metric.name for metric in MODEL_METRICS],
                 axis=alt.Axis(labelAngle=0),
             ),
             xOffset=alt.XOffset("Metrica:N", sort=list(COMPARISON_METRIC_LABELS)),
@@ -1352,11 +1319,12 @@ def render_metrics_module() -> None:
         "Metricas desde JSON",
     )
 
-    if not APP_MODEL_METRICS:
-        st.warning("No hay metricas disponibles para el modelo activo.")
-        return
-
-    metric = APP_MODEL_METRICS[0]
+    selected_model = st.selectbox(
+        "Modelo",
+        [metric.name for metric in MODEL_METRICS],
+        index=min(2, len(MODEL_METRICS) - 1),
+    )
+    metric = next(metric for metric in MODEL_METRICS if metric.name == selected_model)
 
     render_kpis(metric)
     st.divider()
